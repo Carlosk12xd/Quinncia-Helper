@@ -1,7 +1,9 @@
 """Utilities for updating Quinncia Appendix tables in a PowerPoint deck.
 
 This module updates:
+- Slide 1: KPI overview, from the Overall Marriott School row in "Quinncia Metrics (All Students)"
 - Slide 2: Appendix: Entire MSB, from "Quinncia Metrics (All Students)"
+- Slide 3: Class of 2027 KPI overview, from the Overall Marriott School row in "Quinncia Metrics (Class of 2027 and Above)"
 - Slide 4: Appendix: Class of 2027, from "Quinncia Metrics (Class of 2027 and Above)"
 
 It keeps the PowerPoint's program labels and formatting, while replacing only the values.
@@ -11,8 +13,11 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
+from datetime import date
+from xml.sax.saxutils import escape
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -114,6 +119,7 @@ class SlideUpdateSummary:
 @dataclass
 class UpdateSummary:
     slide_summaries: List[SlideUpdateSummary]
+    kpi_slides_updated: List[int]
 
     @property
     def updated_rows(self) -> int:
@@ -132,7 +138,8 @@ class UpdateSummary:
 
     @property
     def slide_updated(self) -> str:
-        return ", ".join(str(s.slide_number) for s in self.slide_summaries)
+        slides = sorted(set(self.kpi_slides_updated + [s.slide_number for s in self.slide_summaries]))
+        return ", ".join(str(slide) for slide in slides)
 
 
 def _norm(text: object) -> str:
@@ -361,8 +368,104 @@ def _update_one_table(prs: Presentation, df: pd.DataFrame, slide_index: int, sli
     )
 
 
+
+def _percent_text(value: object) -> str:
+    """Format a decimal percentage as one display decimal, using normal half-up rounding."""
+    raw = str(value).strip()
+    if not raw:
+        return "0.0%"
+    try:
+        number = Decimal(raw) * Decimal("100")
+    except (InvalidOperation, ValueError):
+        return raw
+    number = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"{number}%"
+
+
+def _overall_metrics_row(df: pd.DataFrame, section_title: str) -> pd.Series:
+    for _, row in df.iterrows():
+        if _norm(row.get("major", "")) == _norm("Overall Marriott School"):
+            return row
+    if len(df) > 0:
+        # In the Quinncia export, the final row is the total row if the label changes.
+        return df.iloc[-1]
+    raise ValueError(f"The section '{section_title}' does not contain any data rows.")
+
+
+def _ordinal_suffix(day: int) -> str:
+    if 11 <= day % 100 <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _date_text_parts(current_date: date) -> Tuple[str, str, str]:
+    month = current_date.strftime("%B")
+    return f"{month} {current_date.day}", _ordinal_suffix(current_date.day), f", {current_date.year}"
+
+
+def _kpi_text_replacements(row: pd.Series, current_date: date) -> Dict[int, str]:
+    month_day, suffix, year_text = _date_text_parts(current_date)
+    return {
+        1: _percent_text(row.get("signup_pct", "")),
+        2: f"{format_metric_value(row.get('quinncia_sign_ups', ''))} / {format_metric_value(row.get('enrolled_students', ''))} ",
+        4: _percent_text(row.get("resume_student_pct", "")),
+        5: f"{format_metric_value(row.get('resume_students', ''))} ",
+        7: f"{format_metric_value(row.get('resume_uploads', ''))} ",
+        11: _percent_text(row.get("linkedin_student_pct", "")),
+        12: f"{format_metric_value(row.get('linkedin_students', ''))} ",
+        14: f"{format_metric_value(row.get('linkedin_uploads', ''))} ",
+        18: _percent_text(row.get("interview_student_pct", "")),
+        19: f"{format_metric_value(row.get('interview_students', ''))} ",
+        21: f"{format_metric_value(row.get('interview_uploads', ''))} ",
+        25: _percent_text(row.get("all_three_student_pct", "")),
+        26: f"{format_metric_value(row.get('all_three_students', ''))} ",
+        41: month_day,
+        42: suffix,
+        43: year_text,
+    }
+
+
+def _replace_text_nodes_by_index(xml_text: str, replacements: Dict[int, str]) -> str:
+    pattern = re.compile(r"(<a:t[^>]*>)(.*?)(</a:t>)", flags=re.DOTALL)
+    index = -1
+
+    def replace(match: re.Match) -> str:
+        nonlocal index
+        index += 1
+        if index not in replacements:
+            return match.group(0)
+        return match.group(1) + escape(str(replacements[index])) + match.group(3)
+
+    return pattern.sub(replace, xml_text)
+
+
+def _make_red_text_black(xml_text: str) -> str:
+    return re.sub(r'(<a:srgbClr\b[^>]*\bval=")FF0000("[^>]*/?>)', r'\g<1>000000\2', xml_text, flags=re.IGNORECASE)
+
+
+def _update_kpi_slides_xml(pptx_bytes: bytes, all_students_df: pd.DataFrame, class_2027_df: pd.DataFrame) -> bytes:
+    replacements_by_slide = {
+        1: _kpi_text_replacements(_overall_metrics_row(all_students_df, ALL_STUDENTS_SECTION), date.today()),
+        3: _kpi_text_replacements(_overall_metrics_row(class_2027_df, CLASS_2027_SECTION), date.today()),
+    }
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(pptx_bytes), "r") as zin, zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            match = re.match(r"ppt/slides/slide(1|3)\.xml$", item.filename)
+            if match:
+                slide_number = int(match.group(1))
+                xml_text = data.decode("utf-8")
+                xml_text = _replace_text_nodes_by_index(xml_text, replacements_by_slide[slide_number])
+                xml_text = _make_red_text_black(xml_text)
+                data = xml_text.encode("utf-8")
+            zout.writestr(item, data)
+    output.seek(0)
+    return output.getvalue()
+
 def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename: str) -> Tuple[bytes, UpdateSummary]:
-    """Update slide 2 and slide 4 of a PowerPoint using Quinncia metrics data."""
+    """Update KPI slides 1/3 and appendix table slides 2/4 using Quinncia metrics data."""
     all_students_df = load_metrics_table(metrics_bytes, metrics_filename, ALL_STUDENTS_SECTION)
     class_2027_df = load_metrics_table(metrics_bytes, metrics_filename, CLASS_2027_SECTION)
 
@@ -375,4 +478,5 @@ def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename:
     output = io.BytesIO()
     prs.save(output)
     output.seek(0)
-    return output.getvalue(), UpdateSummary(slide_summaries=summaries)
+    updated_bytes = _update_kpi_slides_xml(output.getvalue(), all_students_df, class_2027_df)
+    return updated_bytes, UpdateSummary(slide_summaries=summaries, kpi_slides_updated=[1, 3])

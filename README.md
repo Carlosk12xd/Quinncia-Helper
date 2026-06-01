@@ -4,10 +4,12 @@ Streamlit app that updates Quinncia appendix tables in the Career Readiness Mile
 
 ## What it updates
 
-- Slide 2: **Appendix: Entire MSB** using the CSV/Excel section **Quinncia Metrics (All Students)**
-- Slide 4: **Appendix: Class of 2027** using the CSV/Excel section **Quinncia Metrics (Class of 2027 and Above)**
+- Slide 1: **Career Launch Readiness KPIs** using the Overall Marriott School row from **Quinncia Metrics (All Students)**
+- Slide 2: **Appendix: Entire MSB** using **Quinncia Metrics (All Students)**
+- Slide 3: **Career Launch Readiness KPIs: Class of 2027** using the Overall Marriott School row from **Quinncia Metrics (Class of 2027 and Above)**
+- Slide 4: **Appendix: Class of 2027** using **Quinncia Metrics (Class of 2027 and Above)**
 
-The app preserves the PowerPoint program labels, including HR, BSIS, MISM, and Overall MSB, while matching those rows to the Quinncia export names. It also makes the updated table text black.
+The app preserves the PowerPoint program labels, including HR, BSIS, MISM, and Overall MSB, while matching those rows to the Quinncia export names. It also updates the date to the day the app runs and makes the updated text black.
 
 ## Run locally
 

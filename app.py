@@ -8,13 +8,13 @@ from quinncia_pptx_updater import update_powerpoint
 st.set_page_config(page_title="Quinncia PowerPoint Updater", page_icon="📊", layout="centered")
 
 st.title("Quinncia PowerPoint Updater")
-st.caption("Upload the report PowerPoint and the Quinncia metrics CSV/Excel export. The app updates slide 2 and slide 4.")
+st.caption("Upload the report PowerPoint and the Quinncia metrics CSV/Excel export. The app updates slides 1 through 4.")
 
 with st.expander("What this app changes", expanded=True):
     st.write(
-        "This app updates **slide 2: Appendix: Entire MSB** from **Quinncia Metrics (All Students)** "
-        "and **slide 4: Appendix: Class of 2027** from **Quinncia Metrics (Class of 2027 and Above)**. "
-        "It leaves the rest of the deck alone and makes the updated table body text black."
+        "This app updates **slide 1: KPI overview** and **slide 2: Appendix: Entire MSB** from **Quinncia Metrics (All Students)** "
+        "and **slide 3: Class of 2027 KPI overview** and **slide 4: Appendix: Class of 2027** from **Quinncia Metrics (Class of 2027 and Above)**. "
+        "It leaves the rest of the deck alone, updates the date to today, and makes the updated text black."
     )
 
 pptx_file = st.file_uploader("1. Upload the PowerPoint template/report", type=["pptx"])
