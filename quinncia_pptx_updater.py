@@ -1,7 +1,10 @@
-"""Utilities for updating the Quinncia Appendix table in a PowerPoint deck.
+"""Utilities for updating Quinncia Appendix tables in a PowerPoint deck.
 
-This module updates slide 2 only: Appendix: Entire MSB.
-It pulls values from the first CSV/Excel section named "Quinncia Metrics (All Students)".
+This module updates:
+- Slide 2: Appendix: Entire MSB, from "Quinncia Metrics (All Students)"
+- Slide 4: Appendix: Class of 2027, from "Quinncia Metrics (Class of 2027 and Above)"
+
+It keeps the PowerPoint's program labels and formatting, while replacing only the values.
 """
 
 from __future__ import annotations
@@ -10,17 +13,18 @@ import io
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.util import Pt
 
-SECTION_TITLE = "Quinncia Metrics (All Students)"
-TARGET_SLIDE_INDEX = 1  # slide 2 in PowerPoint, zero-indexed in python-pptx
+ALL_STUDENTS_SECTION = "Quinncia Metrics (All Students)"
+CLASS_2027_SECTION = "Quinncia Metrics (Class of 2027 and Above)"
 BLACK = RGBColor(0, 0, 0)
 
-# PowerPoint display names on slide 2 -> names used in the Quinncia export.
+# PowerPoint display names -> names used in the Quinncia export.
 PROGRAM_LOOKUP = {
     "HR": "Human Resource Management",
     "BSIS": "Information Systems (BS)",
@@ -99,12 +103,36 @@ REQUIRED_COLUMNS = {"major"} | set(HEADER_TO_METRIC.values())
 
 
 @dataclass
-class UpdateSummary:
+class SlideUpdateSummary:
+    slide_number: int
+    section_used: str
     updated_rows: int
     updated_cells: int
     missing_programs: List[str]
-    section_used: str = SECTION_TITLE
-    slide_updated: int = 2
+
+
+@dataclass
+class UpdateSummary:
+    slide_summaries: List[SlideUpdateSummary]
+
+    @property
+    def updated_rows(self) -> int:
+        return sum(s.updated_rows for s in self.slide_summaries)
+
+    @property
+    def updated_cells(self) -> int:
+        return sum(s.updated_cells for s in self.slide_summaries)
+
+    @property
+    def missing_programs(self) -> List[str]:
+        missing: List[str] = []
+        for s in self.slide_summaries:
+            missing.extend([f"Slide {s.slide_number}: {p}" for p in s.missing_programs])
+        return missing
+
+    @property
+    def slide_updated(self) -> str:
+        return ", ".join(str(s.slide_number) for s in self.slide_summaries)
 
 
 def _norm(text: object) -> str:
@@ -127,23 +155,40 @@ def _decode_bytes(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _extract_csv_section(raw: bytes) -> pd.DataFrame:
-    """Extract the Quinncia Metrics (All Students) section from a multi-section CSV."""
+def _clean_metrics_table(df: pd.DataFrame, section_title: str) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [_canon_col(c) for c in df.columns]
+
+    df = df.replace({pd.NA: ""}).fillna("")
+    for col in df.columns:
+        df[col] = df[col].map(lambda x: str(x).strip())
+    df = df[df.apply(lambda row: any(str(x).strip() for x in row), axis=1)]
+
+    missing = sorted(REQUIRED_COLUMNS - set(df.columns))
+    if missing:
+        raise ValueError(
+            f"The section '{section_title}' is missing these required columns: " + ", ".join(missing)
+        )
+    return df
+
+
+def _extract_csv_section(raw: bytes, section_title: str) -> pd.DataFrame:
     text = _decode_bytes(raw)
     lines = text.splitlines()
-    target = _norm(SECTION_TITLE)
+    target = _norm(section_title)
 
     start = None
     for i, line in enumerate(lines):
-        # Strip delimiter-only noise that sometimes appears in CSV exports.
         cleaned = line.strip().strip(",")
         if _norm(cleaned) == target:
             start = i + 1
             break
 
     if start is None:
-        # Fall back to treating the upload as a simple one-table CSV.
-        return pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+        # Fallback only for the all-students section if a simple one-table CSV is uploaded.
+        if _norm(section_title) == _norm(ALL_STUDENTS_SECTION):
+            return pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+        raise ValueError(f"Could not find the section '{section_title}' in the uploaded CSV.")
 
     section_lines: List[str] = []
     for line in lines[start:]:
@@ -154,23 +199,20 @@ def _extract_csv_section(raw: bytes) -> pd.DataFrame:
         section_lines.append(line)
 
     if not section_lines:
-        raise ValueError(f"Found '{SECTION_TITLE}', but no table was found underneath it.")
+        raise ValueError(f"Found '{section_title}', but no table was found underneath it.")
 
     return pd.read_csv(io.StringIO("\n".join(section_lines)), dtype=str, keep_default_na=False)
 
 
-def _read_excel_metrics(raw: bytes) -> pd.DataFrame:
-    """Read metrics from an Excel workbook, if the export is uploaded as .xlsx."""
+def _read_excel_metrics(raw: bytes, section_title: str) -> pd.DataFrame:
     excel = pd.ExcelFile(io.BytesIO(raw))
-    target_norm = _norm(SECTION_TITLE)
+    target_norm = _norm(section_title)
 
-    # Preferred: sheet is named exactly/approximately like the section.
     for sheet_name in excel.sheet_names:
         sheet_norm = _norm(sheet_name)
-        if sheet_norm == target_norm or ("quinncia metrics" in sheet_norm and "all students" in sheet_norm):
+        if sheet_norm == target_norm:
             return pd.read_excel(io.BytesIO(raw), sheet_name=sheet_name, dtype=str, keep_default_na=False)
 
-    # Fallback: scan sheets for either the section title or a header row starting with major.
     for sheet_name in excel.sheet_names:
         scan = pd.read_excel(io.BytesIO(raw), sheet_name=sheet_name, header=None, dtype=str, keep_default_na=False)
         for row_idx in range(len(scan)):
@@ -178,8 +220,6 @@ def _read_excel_metrics(raw: bytes) -> pd.DataFrame:
             normalized_row = [_norm(x) for x in row_values]
             if target_norm in normalized_row:
                 header_idx = row_idx + 1
-            elif "major" in normalized_row:
-                header_idx = row_idx
             else:
                 continue
 
@@ -193,39 +233,37 @@ def _read_excel_metrics(raw: bytes) -> pd.DataFrame:
             if data_rows:
                 return pd.DataFrame(data_rows, columns=header)
 
-    raise ValueError(
-        "Could not find a sheet or section named 'Quinncia Metrics (All Students)' in the uploaded spreadsheet."
-    )
+    # Simple-table fallback for all-students section only.
+    if _norm(section_title) == _norm(ALL_STUDENTS_SECTION):
+        for sheet_name in excel.sheet_names:
+            scan = pd.read_excel(io.BytesIO(raw), sheet_name=sheet_name, header=None, dtype=str, keep_default_na=False)
+            for row_idx in range(len(scan)):
+                normalized_row = [_norm(x) for x in scan.iloc[row_idx].tolist()]
+                if "major" in normalized_row:
+                    header = [str(x).strip() for x in scan.iloc[row_idx].tolist()]
+                    data_rows = []
+                    for data_idx in range(row_idx + 1, len(scan)):
+                        row = scan.iloc[data_idx].tolist()
+                        if not any(str(x).strip() for x in row):
+                            break
+                        data_rows.append(row)
+                    if data_rows:
+                        return pd.DataFrame(data_rows, columns=header)
+
+    raise ValueError(f"Could not find the section '{section_title}' in the uploaded spreadsheet.")
 
 
-def load_metrics_table(raw: bytes, filename: str) -> pd.DataFrame:
-    """Load and normalize the Quinncia Metrics (All Students) table."""
+def load_metrics_table(raw: bytes, filename: str, section_title: str = ALL_STUDENTS_SECTION) -> pd.DataFrame:
     lower_name = filename.lower()
-    if lower_name.endswith(".xlsx") or lower_name.endswith(".xlsm") or lower_name.endswith(".xls"):
-        df = _read_excel_metrics(raw)
+    if lower_name.endswith((".xlsx", ".xlsm", ".xls")):
+        df = _read_excel_metrics(raw, section_title)
     else:
-        df = _extract_csv_section(raw)
-
-    df = df.copy()
-    df.columns = [_canon_col(c) for c in df.columns]
-
-    # Drop fully empty rows and trim string cells.
-    df = df.replace({pd.NA: ""}).fillna("")
-    for col in df.columns:
-        df[col] = df[col].map(lambda x: str(x).strip())
-    df = df[df.apply(lambda row: any(str(x).strip() for x in row), axis=1)]
-
-    missing = sorted(REQUIRED_COLUMNS - set(df.columns))
-    if missing:
-        raise ValueError(
-            "The metrics table is missing these required columns: " + ", ".join(missing)
-        )
-
-    return df
+        df = _extract_csv_section(raw, section_title)
+    return _clean_metrics_table(df, section_title)
 
 
 def format_metric_value(value: object) -> str:
-    """Format values for PowerPoint exactly like the report table: no unnecessary .0 or trailing zeros."""
+    """Format values for PowerPoint: no unnecessary .0 or trailing zeros."""
     if value is None:
         return ""
     raw = str(value).strip()
@@ -239,23 +277,17 @@ def format_metric_value(value: object) -> str:
 
     if number == number.to_integral_value():
         return str(int(number))
-
-    # Avoid scientific notation and strip trailing zeros.
     return format(number.normalize(), "f").rstrip("0").rstrip(".")
 
 
 def _set_cell_text(cell, text: str, black: bool = True) -> None:
-    """Replace a table cell's text while keeping the existing paragraph/cell styling as much as possible."""
     text = "" if text is None else str(text)
     tf = cell.text_frame
 
-    # Keep only the first paragraph.
     for paragraph in list(tf.paragraphs)[1:]:
         paragraph._element.getparent().remove(paragraph._element)
 
     paragraph = tf.paragraphs[0]
-
-    # Keep only the first run, so alignment/font size from the template is retained.
     if paragraph.runs:
         run = paragraph.runs[0]
         run.text = text
@@ -267,40 +299,37 @@ def _set_cell_text(cell, text: str, black: bool = True) -> None:
 
     if black:
         run.font.color.rgb = BLACK
+    if run.font.size is None:
+        run.font.size = Pt(9)
 
 
-def _find_appendix_table(prs: Presentation):
+def _find_appendix_table(prs: Presentation, slide_index: int, slide_number: int):
     try:
-        slide = prs.slides[TARGET_SLIDE_INDEX]
+        slide = prs.slides[slide_index]
     except IndexError as exc:
-        raise ValueError("The uploaded PowerPoint does not have a slide 2 to update.") from exc
+        raise ValueError(f"The uploaded PowerPoint does not have a slide {slide_number} to update.") from exc
 
     for shape in slide.shapes:
         if not shape.has_table:
             continue
         table = shape.table
         headers = [table.cell(0, c).text.strip() for c in range(len(table.columns))]
-        header_set = set(headers)
-        if {"Program", "Students", "Sign Ups", "Sign Up%"}.issubset(header_set):
+        if {"Program", "Students", "Sign Ups", "Sign Up%"}.issubset(set(headers)):
             return table
 
-    raise ValueError("Could not find the Appendix: Entire MSB table on slide 2.")
+    raise ValueError(f"Could not find the Appendix table on slide {slide_number}.")
 
 
-def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename: str) -> Tuple[bytes, UpdateSummary]:
-    """Update slide 2 of a PowerPoint using Quinncia Metrics (All Students) data."""
-    df = load_metrics_table(metrics_bytes, metrics_filename)
+def _update_one_table(prs: Presentation, df: pd.DataFrame, slide_index: int, slide_number: int, section_title: str) -> SlideUpdateSummary:
     data_by_major: Dict[str, pd.Series] = {
         _norm(row["major"]): row for _, row in df.iterrows() if str(row.get("major", "")).strip()
     }
 
-    prs = Presentation(io.BytesIO(pptx_bytes))
-    table = _find_appendix_table(prs)
-
+    table = _find_appendix_table(prs, slide_index, slide_number)
     headers = [table.cell(0, c).text.strip() for c in range(len(table.columns))]
     missing_headers = [h for h in headers[1:] if h not in HEADER_TO_METRIC]
     if missing_headers:
-        raise ValueError("Unrecognized table headers on slide 2: " + ", ".join(missing_headers))
+        raise ValueError(f"Unrecognized table headers on slide {slide_number}: " + ", ".join(missing_headers))
 
     updated_rows = 0
     updated_cells = 0
@@ -311,9 +340,7 @@ def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename:
         source_program = PROGRAM_LOOKUP.get(display_program, display_program)
         row = data_by_major.get(_norm(source_program))
 
-        # Keep program labels from the PowerPoint and make body text black.
         _set_cell_text(table.cell(r, 0), display_program, black=True)
-
         if row is None:
             missing_programs.append(display_program)
             continue
@@ -325,13 +352,27 @@ def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename:
             _set_cell_text(table.cell(r, c), value, black=True)
             updated_cells += 1
 
-    output = io.BytesIO()
-    prs.save(output)
-    output.seek(0)
-
-    summary = UpdateSummary(
+    return SlideUpdateSummary(
+        slide_number=slide_number,
+        section_used=section_title,
         updated_rows=updated_rows,
         updated_cells=updated_cells,
         missing_programs=missing_programs,
     )
-    return output.getvalue(), summary
+
+
+def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename: str) -> Tuple[bytes, UpdateSummary]:
+    """Update slide 2 and slide 4 of a PowerPoint using Quinncia metrics data."""
+    all_students_df = load_metrics_table(metrics_bytes, metrics_filename, ALL_STUDENTS_SECTION)
+    class_2027_df = load_metrics_table(metrics_bytes, metrics_filename, CLASS_2027_SECTION)
+
+    prs = Presentation(io.BytesIO(pptx_bytes))
+    summaries = [
+        _update_one_table(prs, all_students_df, slide_index=1, slide_number=2, section_title=ALL_STUDENTS_SECTION),
+        _update_one_table(prs, class_2027_df, slide_index=3, slide_number=4, section_title=CLASS_2027_SECTION),
+    ]
+
+    output = io.BytesIO()
+    prs.save(output)
+    output.seek(0)
+    return output.getvalue(), UpdateSummary(slide_summaries=summaries)

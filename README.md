@@ -1,42 +1,29 @@
 # Quinncia PowerPoint Updater
 
-A Streamlit app that updates slide 2, **Appendix: Entire MSB**, in the Career Readiness Milestone Report PowerPoint.
+Streamlit app that updates Quinncia appendix tables in the Career Readiness Milestone Report PowerPoint.
 
-## What it does
+## What it updates
 
-- Upload a `.pptx` report/template.
-- Upload a Quinncia metrics `.csv` or `.xlsx` export.
-- Pull only the first section named `Quinncia Metrics (All Students)`.
-- Update slide 2 values in the Appendix table.
-- Preserve PowerPoint program labels like `HR`, `BSIS`, `MISM`, and `Overall MSB` while matching them to the Quinncia export rows.
-- Make the updated table body text black.
-- Leave the rest of the deck unchanged.
+- Slide 2: **Appendix: Entire MSB** using the CSV/Excel section **Quinncia Metrics (All Students)**
+- Slide 4: **Appendix: Class of 2027** using the CSV/Excel section **Quinncia Metrics (Class of 2027 and Above)**
 
-## Local setup
+The app preserves the PowerPoint program labels, including HR, BSIS, MISM, and Overall MSB, while matching those rows to the Quinncia export names. It also makes the updated table text black.
+
+## Run locally
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Streamlit Cloud setup
+## Deploy to Streamlit Cloud
 
-1. Put these files in a GitHub repository:
+1. Upload these files to a GitHub repository:
    - `app.py`
    - `quinncia_pptx_updater.py`
    - `requirements.txt`
-2. Deploy the repo on Streamlit Cloud.
-3. Upload the PowerPoint and Quinncia export in the app.
-4. Click **Update PowerPoint** and download the finished deck.
-
-## Expected Quinncia source
-
-The CSV can be a multi-section export like this:
-
-```text
-Quinncia Metrics (All Students)
-major,enrolled_students,quinncia_sign_ups,...
-Accounting (BS),311,133,...
-```
-
-The app ignores later sections such as class-specific metrics, job search stats, and internship search stats.
+   - `README.md`
+2. Create a new Streamlit Cloud app.
+3. Set the main file path to `app.py`.
+4. Upload your PowerPoint and Quinncia CSV/Excel export in the app.
+5. Download the updated PowerPoint.
