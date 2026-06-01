@@ -426,7 +426,7 @@ def _kpi_text_replacements(row: pd.Series, current_date: date) -> Dict[int, str]
 
 
 def _replace_text_nodes_by_index(xml_text: str, replacements: Dict[int, str]) -> str:
-    pattern = re.compile(r"(<a:t[^>]*>)(.*?)(</a:t>)", flags=re.DOTALL)
+    pattern = re.compile(r"(<a:t\b[^>]*>)(.*?)(</a:t>)", flags=re.DOTALL)
     index = -1
 
     def replace(match: re.Match) -> str:
@@ -443,7 +443,13 @@ def _make_red_text_black(xml_text: str) -> str:
     return re.sub(r'(<a:srgbClr\b[^>]*\bval=")FF0000("[^>]*/?>)', r'\g<1>000000\2', xml_text, flags=re.IGNORECASE)
 
 
-def _update_kpi_slides_xml(pptx_bytes: bytes, all_students_df: pd.DataFrame, class_2027_df: pd.DataFrame) -> bytes:
+def _update_slides_xml(pptx_bytes: bytes, all_students_df: pd.DataFrame, class_2027_df: pd.DataFrame) -> bytes:
+    """Update KPI text on slides 1/3 and force updated slide text styles from red to black.
+
+    python-pptx correctly changes the visible table runs on slides 2/4 to black, but PowerPoint
+    can retain a red end-of-paragraph style in the underlying XML. This final XML pass cleans
+    those leftover red styles on slides 1-4 so future edits and empty cells do not stay red.
+    """
     replacements_by_slide = {
         1: _kpi_text_replacements(_overall_metrics_row(all_students_df, ALL_STUDENTS_SECTION), date.today()),
         3: _kpi_text_replacements(_overall_metrics_row(class_2027_df, CLASS_2027_SECTION), date.today()),
@@ -453,11 +459,12 @@ def _update_kpi_slides_xml(pptx_bytes: bytes, all_students_df: pd.DataFrame, cla
     with zipfile.ZipFile(io.BytesIO(pptx_bytes), "r") as zin, zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
-            match = re.match(r"ppt/slides/slide(1|3)\.xml$", item.filename)
+            match = re.match(r"ppt/slides/slide([1-4])\.xml$", item.filename)
             if match:
                 slide_number = int(match.group(1))
                 xml_text = data.decode("utf-8")
-                xml_text = _replace_text_nodes_by_index(xml_text, replacements_by_slide[slide_number])
+                if slide_number in replacements_by_slide:
+                    xml_text = _replace_text_nodes_by_index(xml_text, replacements_by_slide[slide_number])
                 xml_text = _make_red_text_black(xml_text)
                 data = xml_text.encode("utf-8")
             zout.writestr(item, data)
@@ -478,5 +485,5 @@ def update_powerpoint(pptx_bytes: bytes, metrics_bytes: bytes, metrics_filename:
     output = io.BytesIO()
     prs.save(output)
     output.seek(0)
-    updated_bytes = _update_kpi_slides_xml(output.getvalue(), all_students_df, class_2027_df)
+    updated_bytes = _update_slides_xml(output.getvalue(), all_students_df, class_2027_df)
     return updated_bytes, UpdateSummary(slide_summaries=summaries, kpi_slides_updated=[1, 3])
